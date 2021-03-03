@@ -44,8 +44,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import pytorch_lightning as pl
 import torch
 from core.data import PneumoniaDataModule
+from core.model import PneumoniaDetector
+from pytorch_lightning.loggers import TensorBoardLogger
+from sklearn.metrics import confusion_matrix
+from torch.nn import functional as F
 
 # %% [markdown]
 # ### Exploratory Data Analysis
@@ -65,7 +70,9 @@ for data_type in ("train", "val", "test"):
         label_counts[data_type][label] = label_count
 
 label_counts = pd.DataFrame(label_counts).T
-label_counts["normal_freq"] = label_counts["NORMAL"] / (label_counts["NORMAL"] + label_counts["PNEUMONIA"])
+label_counts["normal_freq"] = label_counts["NORMAL"] / (
+    label_counts["NORMAL"] + label_counts["PNEUMONIA"]
+)
 label_counts
 
 # %% [markdown]
@@ -116,3 +123,67 @@ for i in range(8):
 # 5. `configure_optimizers` as its name suggests, configures one or multiple optimizers.
 #
 # We'll try to follow [PyTorch Lightning's style guides](https://pytorch-lightning.readthedocs.io/en/stable/starter/style_guide.html) when defining our model. The model can be found in `./core/model.py`. What we did was simply stripping out the last layer of ResNet, and replace it with a layer that has the same input dimensions but an output of only two nodes. The layers from ResNet are all frozen for faster training.
+
+# %%
+# Set random seed for pytorch, numpy, python.random
+pl.seed_everything(42)
+
+# Init data and model
+dm = PneumoniaDataModule(
+    data_dir,
+    batch_size=64,
+    num_workers=16,
+)
+
+model = PneumoniaDetector(lr=1e-3)
+
+# setup trainer
+logger = TensorBoardLogger("tb_logs", name="pneumonia_bin_classifier")
+trainer = pl.Trainer(
+    max_epochs=15,
+    gpus=1,
+    logger=logger,
+    deterministic=True,
+)
+
+# %%
+# train model
+trainer.fit(model, dm)
+
+# test on best checkpoint
+test_metrics = trainer.test(datamodule=dm)
+
+# %% [markdown]
+# The baseline model performs really well on the training and validation sets -- accuracy, precision, recall, and F1 score are all >0.95. However, the test metrics are much worse (~0.79 for all metrics except recall). We could closer examine the predictions on the test set using a confusion matrix.
+
+# %%
+# Evaluate on the test set: confusion matrix
+model.freeze()
+y_pred, y_true = [], []
+
+for batch in dm.test_dataloader():
+    x, y = batch
+    y_hat = model(x.cuda())
+    pred = F.log_softmax(y_hat, dim=1).argmax(dim=1)
+    y_pred.append(pred)
+    y_true.append(y)
+
+y_pred = torch.cat(y_pred).cpu()
+y_true = torch.cat(y_true).cpu()
+
+mat = confusion_matrix(y_true, y_pred, labels=sorted(dm.class_to_idx.values()))
+mat = pd.DataFrame(mat, columns=labels, index=labels)
+mat
+
+# %% [markdown]
+# |           | Predicted normal | Predicted Pneumonia |
+# |:----------|-----------------:|--------------------:|
+# | Normal    |              110 |                 124 |
+# | Pneumonia |                3 |                 387 |
+#
+# From the confusion matrix, it seems we are getting a lot of false positives where normal X-rays are predicted as pneumonia images. Possible reasons are:
+#
+# 1. Our model is performing really well, it's just some of the images in the test set are mislabeled.
+# 2. We're overfitting to the training set, and the false positives are because of the class imbalance.
+#
+# Although (2) is the more likely reason, we could easily check (1) by holding out part of the training set as the new "test set" and train on the remaining data. If the performance on the "test set" greatly improves, then *maybe* there actually is mislabeling going on.
