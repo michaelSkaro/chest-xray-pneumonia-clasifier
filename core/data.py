@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 from torch.utils.data import ConcatDataset, DataLoader, random_split
+from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
 
@@ -25,9 +26,18 @@ class PneumoniaDataModule(pl.LightningDataModule):
     def setup(self, stage):
         # make assignments here (val/train/test split)
         # called on every process in DDP
+        img_transforms = transforms.Compose(
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+            ]
+        )
         if stage == "fit":
-            pneumonia_train = ImageFolder(self.data_dir / "train")
-            pneumonia_val = ImageFolder(self.data_dir / "val")
+            pneumonia_train = ImageFolder(
+                self.data_dir / "train", transform=img_transforms
+            )
+            pneumonia_val = ImageFolder(self.data_dir / "val", transform=img_transforms)
             dat = ConcatDataset([pneumonia_train, pneumonia_val])
 
             # Re-split train and val sets because the original
@@ -40,7 +50,9 @@ class PneumoniaDataModule(pl.LightningDataModule):
             )
 
         if stage == "test":
-            self.pneumonia_test = ImageFolder(self.data_dir / "test")
+            self.pneumonia_test = ImageFolder(
+                self.data_dir / "test", transform=img_transforms
+            )
             self.class_to_idx = self.pneumonia_test.class_to_idx
 
     def train_dataloader(self):

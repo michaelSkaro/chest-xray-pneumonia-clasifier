@@ -41,7 +41,10 @@
 # %%
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
+import torch
+from core.data import PneumoniaDataModule
 
 # %% [markdown]
 # ### Exploratory Data Analysis
@@ -75,4 +78,25 @@ label_counts
 # 2. `setup` contains data operations we might want to perform on every GPU, e.g. apply transforms, perform train/val splits, count frequency of the labels, etc.
 # 3. `(train|val|test)_dataloader` generates data loaders for the corresponding datasets. Usually most of the work is already done in `setup`, so we just need to wrap the dataset and return a `DataLoader`. The batch sizes and number of threads to read the data are defined here.
 #
-# The defined `datamodule` can be found in `./core/data.py`.
+# The defined `datamodule` can be found in `./core/data.py`. By default the files are not sorted, so all the normal samples would be retrieved first and then we get all the pneumonia samples. We can grab some images and see if there's any obvious differences between the groups.
+
+# %%
+dm_test = PneumoniaDataModule(data_dir, batch_size=4)
+dm_test.setup("test")
+
+dm_test_gen = iter(dm_test.test_dataloader())
+normal_imgs, normal_labels = next(dm_test_gen)
+for pneumonia_imgs, pneumonia_labels in dm_test_gen:
+    pass
+
+imgs = torch.cat((normal_imgs, pneumonia_imgs))
+img_labels = normal_labels.tolist() + pneumonia_labels.tolist()
+label_idx = {val: key for key, val in dm_test.class_to_idx.items()}
+
+fig, axs = plt.subplots(nrows=2, ncols=4, figsize=(24, 12))
+for i in range(8):
+    axs[i // 4, i % 4].imshow(imgs[i].permute(1, 2, 0))
+    axs[i // 4, i % 4].text(80, -5, label_idx[img_labels[i]])
+
+# %% [markdown]
+# [Here's a pretty good explanation](https://radiologyassistant.nl/chest/chest-x-ray/lung-disease) of what we should be looking for in the chest X-rays. From what I can tell, the images of patients with pneumonia are more cloudy, and the edges of the lung aren't as clear as the ones in the normal images.
