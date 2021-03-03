@@ -76,7 +76,7 @@ label_counts["normal_freq"] = label_counts["NORMAL"] / (
 label_counts
 
 # %% [markdown]
-# The test set is roughly 10% of the entire dataset. Two obvious problems can be found from this table:
+# dm_test.pneumonia_test[:4]The test set is roughly 10% of the entire dataset. Two obvious problems can be found from this table:
 #
 # 1. The validation set is too small, and
 # 2. There's almost three times as many pneumonia samples as normal ones.
@@ -93,13 +93,16 @@ label_counts
 dm_test = PneumoniaDataModule(data_dir, batch_size=4)
 dm_test.setup("test")
 
-dm_test_gen = iter(dm_test.test_dataloader())
-normal_imgs, normal_labels = next(dm_test_gen)
-for pneumonia_imgs, pneumonia_labels in dm_test_gen:
-    pass
+normal_batch = [dm_test.pneumonia_test[i] for i in range(4)]
+normal_labels = [normal_batch[i][1] for i in range(4)]
+normal_imgs = [normal_batch[i][0] for i in range(4)]
 
-imgs = torch.cat((normal_imgs, pneumonia_imgs))
-img_labels = normal_labels.tolist() + pneumonia_labels.tolist()
+pneumonia_batch = [dm_test.pneumonia_test[i] for i in range(-4, 0)]
+pneumonia_labels = [pneumonia_batch[i][1] for i in range(4)]
+pneumonia_imgs = [pneumonia_batch[i][0] for i in range(4)]
+
+imgs = normal_imgs + pneumonia_imgs
+img_labels = normal_labels + pneumonia_labels
 label_idx = {val: key for key, val in dm_test.class_to_idx.items()}
 
 fig, axs = plt.subplots(nrows=2, ncols=4, figsize=(24, 12))
