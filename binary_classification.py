@@ -31,8 +31,9 @@
 #
 # ### TODO
 #
-# - [ ] Data input and simple EDA.
-# - [ ] Have a baseline model.
+# - [X] Data input and simple EDA.
+# - [X] Have a baseline model.
+# - [ ] Generate a random split using just the training set, and see the performance on the "test set". If it's much better, then maybe there's mislabeling in the given test set.
 # - [ ] Use a weighted cross entropy loss function to account for the class imbalance.
 # - [ ] Augment/Resample the training set to balance the normal and pneumonia samples.
 # - [ ] Tune the hyperparameters.
@@ -64,6 +65,7 @@ for data_type in ("train", "val", "test"):
         label_counts[data_type][label] = label_count
 
 label_counts = pd.DataFrame(label_counts).T
+label_counts["normal_freq"] = label_counts["NORMAL"] / (label_counts["NORMAL"] + label_counts["PNEUMONIA"])
 label_counts
 
 # %% [markdown]
@@ -100,3 +102,17 @@ for i in range(8):
 
 # %% [markdown]
 # [Here's a pretty good explanation](https://radiologyassistant.nl/chest/chest-x-ray/lung-disease) of what we should be looking for in the chest X-rays. From what I can tell, the images of patients with pneumonia are more cloudy, and the edges of the lung aren't as clear as the ones in the normal images.
+#
+# ### Baseline Model
+#
+# The PyTorch library has some pretrained models availabe in the [torchvision](https://pytorch.org/vision/0.8/models.html) package. Here's an article [comparing some of those architectures](https://towardsdatascience.com/the-w3h-of-alexnet-vggnet-resnet-and-inception-7baaaecccc96), and we'll be using [ResNet18](https://arxiv.org/abs/1512.03385) as the backbone of our feature extractor.
+#
+# Similar to the `LightningDataModule`, in PyTorch Lightning we define a model using `LightningModule`. It organizes our PyTorch code into the following sections:
+#
+# 1. `__init__` is the model/system definition.
+# 2. `forward` for making inference and predictions.
+# 3. `training_step` is the training loop. Stuff like calculating the loss function and model metrics go here. We can also define `training_step_end` and `training_epoch_end` hooks for more fine-grained control.
+# 4. `(validation|test)_step` are not required and are very similar to `training_step`. We're defining these as well because we have some custom metrics that we want to log.
+# 5. `configure_optimizers` as its name suggests, configures one or multiple optimizers.
+#
+# We'll try to follow [PyTorch Lightning's style guides](https://pytorch-lightning.readthedocs.io/en/stable/starter/style_guide.html) when defining our model. The model can be found in `./core/model.py`. What we did was simply stripping out the last layer of ResNet, and replace it with a layer that has the same input dimensions but an output of only two nodes. The layers from ResNet are all frozen for faster training.
