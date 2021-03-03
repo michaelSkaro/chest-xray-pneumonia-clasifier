@@ -69,4 +69,10 @@ label_counts
 # 1. The validation set is too small, and
 # 2. There's almost three times as many pneumonia samples as normal ones.
 #
-# The test set should be left aside and only used to assess the performance of the final model. Ignoring the class imbalance problem for now, we can first read in all the training and validation samples, and use a random 90-10 split to generate new training and validation sets.
+# The test set should be left aside and only used to assess the performance of the final model. Ignoring the class imbalance problem for now, we can first read in all the training and validation samples, and use a random 90-10 split to generate new training and validation sets. Since we're planning to use [PyTorch Lightning](https://pytorch-lightning.readthedocs.io/en/stable/) for this project, we might as well start from the beginning and wrap the data loading code in a [datamodule](https://pytorch-lightning.readthedocs.io/en/stable/extensions/datamodules.html). The core methods of a `datamodule` are:
+#
+# 1. `prepare_data` downloads data (i.e. writes to disk). In a distributed setting this method is only called from a single process. In our case we skip the definition of this method because the data was already downloaded.
+# 2. `setup` contains data operations we might want to perform on every GPU, e.g. apply transforms, perform train/val splits, count frequency of the labels, etc.
+# 3. `(train|val|test)_dataloader` generates data loaders for the corresponding datasets. Usually most of the work is already done in `setup`, so we just need to wrap the dataset and return a `DataLoader`. The batch sizes and number of threads to read the data are defined here.
+#
+# The defined `datamodule` can be found in `./core/data.py`.
