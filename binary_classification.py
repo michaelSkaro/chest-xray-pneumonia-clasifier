@@ -28,14 +28,15 @@
 # - Data: https://data.mendeley.com/datasets/rscbjbr9sj/2
 # - License: CC BY 4.0
 # - Citation: http://www.cell.com/cell/fulltext/S0092-8674(18)30154-5
-#
+
+# %% [markdown]
 # ### TODO
 #
 # - [X] Data input and simple EDA.
 # - [X] Have a baseline model.
 # - [ ] Generate a random split using just the training set, and see the performance on the "test set". If it's much better, then maybe there's mislabeling in the given test set.
 # - [ ] Use a weighted cross entropy loss function to account for the class imbalance.
-# - [ ] Augment/Resample the training set to balance the normal and pneumonia samples.
+# - [ ] [Augment](https://stackoverflow.com/questions/51677788/data-augmentation-in-pytorch)/Resample the training set to balance the normal and pneumonia samples.
 # - [ ] Tune the hyperparameters.
 # - [ ] Log images with wrong predictions into TensorBoard and visualize them. Possibly [useful link](https://www.tensorflow.org/tensorboard/image_summaries) from TensorBoard.
 
@@ -43,13 +44,20 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
 from core.data import PneumoniaDataModule
 from core.model import PneumoniaDetector
 from pytorch_lightning.loggers import TensorBoardLogger
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from torch.nn import functional as F
 
 # %% [markdown]
@@ -112,7 +120,42 @@ for i in range(8):
 
 # %% [markdown]
 # [Here's a pretty good explanation](https://radiologyassistant.nl/chest/chest-x-ray/lung-disease) of what we should be looking for in the chest X-rays. From what I can tell, the images of patients with pneumonia are more cloudy, and the edges of the lung aren't as clear as the ones in the normal images.
+
+# %% [markdown]
+# ### Data-Independent Model
 #
+# We may calculate the metrics of a "model" that always predicts the most common class (which is pneumonia in this case) or a model that gives random guesses. These metrics can be used as a baseline for all future models.
+
+# %%
+pneumonia_sample_size = label_counts.loc["train", "PNEUMONIA"]
+normal_sample_size = label_counts.loc["train", "NORMAL"]
+fake_train = [1] * pneumonia_sample_size + [0] * normal_sample_size
+common_pred = [1] * (pneumonia_sample_size + normal_sample_size)
+random_pred = np.random.default_rng(42).choice(
+    2, (pneumonia_sample_size + normal_sample_size)
+)
+
+baseline_metrics = pd.DataFrame(
+    [
+        (
+            accuracy_score(fake_train, common_pred),
+            precision_score(fake_train, common_pred),
+            recall_score(fake_train, common_pred),
+            f1_score(fake_train, common_pred),
+        ),
+        (
+            accuracy_score(fake_train, random_pred),
+            precision_score(fake_train, random_pred),
+            recall_score(fake_train, random_pred),
+            f1_score(fake_train, random_pred),
+        ),
+    ],
+    columns=["Accuracy", "Precision", "Recall", "F1"],
+    index=["common_class", "random_guess"]
+)
+baseline_metrics
+
+# %% [markdown]
 # ### Baseline Model
 #
 # The PyTorch library has some pretrained models availabe in the [torchvision](https://pytorch.org/vision/0.8/models.html) package. Here's an article [comparing some of those architectures](https://towardsdatascience.com/the-w3h-of-alexnet-vggnet-resnet-and-inception-7baaaecccc96), and we'll be using [ResNet18](https://arxiv.org/abs/1512.03385) as the backbone of our feature extractor.
