@@ -34,7 +34,7 @@
 #
 # - [X] Data input and simple EDA.
 # - [X] Have a baseline model.
-# - [ ] Generate a random split using just the training set, and see the performance on the "test set". If it's much better, then maybe there's mislabeling in the given test set.
+# - [X] Generate a random split using just the training set, and see the performance on the "test set". If it's much better, then maybe there's mislabeling in the given test set.
 # - [ ] Use a weighted cross entropy loss function to account for the class imbalance.
 # - [ ] [Augment](https://stackoverflow.com/questions/51677788/data-augmentation-in-pytorch)/Resample the training set to balance the normal and pneumonia samples.
 # - [ ] Tune the hyperparameters.
@@ -151,7 +151,7 @@ baseline_metrics = pd.DataFrame(
         ),
     ],
     columns=["Accuracy", "Precision", "Recall", "F1"],
-    index=["common_class", "random_guess"]
+    index=["common_class", "random_guess"],
 )
 baseline_metrics
 
@@ -186,7 +186,7 @@ model = PneumoniaDetector(lr=1e-3)
 # setup trainer
 logger = TensorBoardLogger("tb_logs", name="pneumonia_bin_classifier")
 trainer = pl.Trainer(
-    max_epochs=15,
+    max_epochs=100,
     gpus=1,
     logger=logger,
     deterministic=True,
@@ -199,27 +199,30 @@ trainer.fit(model, dm)
 # test on best checkpoint
 test_metrics = trainer.test(datamodule=dm)
 
+
 # %% [markdown]
 # The baseline model performs really well on the training and validation sets -- accuracy, precision, recall, and F1 score are all >0.95. However, the test metrics are much worse (~0.79 for all metrics except recall). We could closer examine the predictions on the test set using a confusion matrix.
 
 # %%
 # Evaluate on the test set: confusion matrix
-model.freeze()
-y_pred, y_true = [], []
+def show_confusion_mat(model, datamod):
+    model.freeze()
+    y_pred, y_true = [], []
 
-for batch in dm.test_dataloader():
-    x, y = batch
-    y_hat = model(x.cuda())
-    pred = F.log_softmax(y_hat, dim=1).argmax(dim=1)
-    y_pred.append(pred)
-    y_true.append(y)
+    for batch in datamod.test_dataloader():
+        x, y = batch
+        y_hat = model(x.cuda())
+        pred = F.log_softmax(y_hat, dim=1).argmax(dim=1)
+        y_pred.append(pred)
+        y_true.append(y)
 
-y_pred = torch.cat(y_pred).cpu()
-y_true = torch.cat(y_true).cpu()
+    y_pred = torch.cat(y_pred).cpu()
+    y_true = torch.cat(y_true).cpu()
 
-mat = confusion_matrix(y_true, y_pred, labels=sorted(dm.class_to_idx.values()))
-mat = pd.DataFrame(mat, columns=labels, index=labels)
-mat
+    mat = confusion_matrix(y_true, y_pred, labels=sorted(dm.class_to_idx.values()))
+    return pd.DataFrame(mat, columns=labels, index=labels)
+
+show_confusion_mat(model, dm)
 
 # %% [markdown]
 # |           | Predicted normal | Predicted Pneumonia |
@@ -233,3 +236,47 @@ mat
 # 2. We're overfitting to the training set, and the false positives are because of the class imbalance.
 #
 # Although (2) is the more likely reason, we could easily check (1) by holding out part of the training set as the new "test set" and train on the remaining data. If the performance on the "test set" greatly improves, then *maybe* there actually is mislabeling going on.
+
+# %%
+pl.seed_everything(42)
+
+# Init data and model
+dm_split_train = PneumoniaDataModule(
+    data_dir,
+    sample_from_train=True,
+    batch_size=64,
+    num_workers=16,
+)
+
+model_split_train = PneumoniaDetector(lr=1e-3)
+
+# setup trainer
+logger_split_train = TensorBoardLogger(
+    "tb_logs", name="pneumonia_bin_classifier_resample_train"
+)
+trainer_split_train = pl.Trainer(
+    max_epochs=15,
+    gpus=1,
+    logger=logger_split_train,
+    deterministic=True,
+)
+
+# train model
+trainer_split_train.fit(model_split_train, dm_split_train)
+
+# test on best checkpoint
+test_metrics_split_train = trainer_split_train.test(datamodule=dm_split_train)
+
+# %% [markdown]
+# Okay **that** is interesting. When we ignore the original test set and split the training set into three parts, the train/validation metrics don't change that much, but the test accuracy, precision and recall jump to ~0.96. Let's take a look at the confusion matrix.
+
+# %%
+show_confusion_mat(model_split_train, dm_split_train)
+
+# %% [markdown]
+# |           | Predicted normal | Predicted Pneumonia |
+# |:----------|-----------------:|--------------------:|
+# | Normal    |              135 |                   6 |
+# | Pneumonia |               12 |                 370 |
+#
+# The confusion matrix also seems pretty good. Maybe there is mis-labeling in the given test set, or that the test set doesn't come from the same distribution as the training set. This problem has been discussed by [some other Kaggle users](https://www.kaggle.com/paultimothymooney/chest-xray-pneumonia/discussion/122816), but no consensus was made at the end. The [original publication](https://doi.org/10.1016/j.cell.2018.02.010) reported an accuracy of 92.8%, with a sensitivity of 93.2% and a specificity of 90.1% (Figure 6). Perhaps we just need more epochs.
