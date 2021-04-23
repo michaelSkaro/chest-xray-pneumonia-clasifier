@@ -1,21 +1,13 @@
-# +
 from collections import Counter
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import pandas as pd
 import pytorch_lightning as pl
-from torch.utils.data import ConcatDataset, DataLoader, random_split
+from PIL import Image
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
-from torchvision.datasets.folder import default_loader
-
-# +
-NORM_TRANSFORMS = transforms.Compose(
-    [
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
 
 
 class PneumoniaDataModule(pl.LightningDataModule):
@@ -88,7 +80,7 @@ class PneumoniaDataModule(pl.LightningDataModule):
         # only called on 1 GPU/TPU in distributed
         pass
 
-    def setup(self, stage):
+    def setup(self, stage: str) -> None:
         # make assignments here (val/train/test split)
         # called on every process in DDP
 
@@ -146,7 +138,7 @@ class PneumoniaDataModule(pl.LightningDataModule):
             dat_n, [train_sample_num, val_sample_num]
         )
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.pneumonia_train,
             batch_size=self.batch_size,
@@ -154,7 +146,7 @@ class PneumoniaDataModule(pl.LightningDataModule):
             pin_memory=True,
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.pneumonia_val,
             batch_size=self.batch_size,
@@ -162,7 +154,7 @@ class PneumoniaDataModule(pl.LightningDataModule):
             pin_memory=True,
         )
 
-    def test_dataloader(self):
+    def test_dataloader(self) -> DataLoader:
         return DataLoader(
             self.pneumonia_test,
             batch_size=2 * self.batch_size,
@@ -171,49 +163,86 @@ class PneumoniaDataModule(pl.LightningDataModule):
         )
 
 
-# +
-IMG_EXTENSIONS = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".ppm",
-    ".bmp",
-    ".pgm",
-    ".tif",
-    ".tiff",
-    ".webp",
-)
+def build_dataset_annotation(
+    root_dir: Path, seed: Optional[int] = None
+) -> pd.DataFrame:
+    """Generates annotation table of samples.
+
+    Given a folder, all subdirectories are considered as class labels. Images
+    in each subdirectory are counted, and all classes with smaller sample sizes
+    are resampled. The returned DataFrame can be used as the input for our torch
+    dataset class ImageFolderWithAugmentation.
+
+    Arguments:
+        root_dir (Path): directory containing subdirectories with images.
+        seed (int): seed number for sampling.
+
+    Returns:
+        A pandas DataFrame with columns:
+        - filepath (Path): filepath to the image.
+        - cls_label (str): class label of the image.
+        - aug_image (bool): whether or not the image is resampled.
+    """
+    dir = root_dir.expanduser().resolve()
+    classes = [d.name for d in dir.iterdir() if d.is_dir()]
+
+    # Get file paths for each class label
+    img_paths, cls_labels = [], []
+    for target_class in classes:
+        target_dir = dir / target_class
+        target_imgs = [f for f in target_dir.glob("*.jpeg")]
+        target_labels = [target_class] * len(target_imgs)
+        img_paths.extend(target_imgs)
+        cls_labels.extend(target_labels)
+
+    # Arrange results into a DataFrame
+    annot = pd.DataFrame(
+        {"filepath": img_paths, "cls_label": cls_labels, "aug_image": False}
+    )
+
+    # Count number of samples in each class
+    class_counts = Counter(cls_labels)
+    majority_class = max(class_counts, key=lambda x: class_counts[x])
+    majority_class_size = class_counts[majority_class]
+
+    # Mark samples in the minority class(es) that need to be augmented
+    for target_class in classes:
+        if target_class == majority_class:
+            continue
+
+        augment_size = majority_class_size - class_counts[target_class]
+        aug_samples = (
+            annot.query("cls_label == @target_class")
+            .sample(n=augment_size, replace=True, random_state=seed)
+            .assign(aug_image=True)
+        )
+        annot = pd.concat([annot, aug_samples], axis=0, ignore_index=True)
+
+    annot.reset_index(drop=True, inplace=True)
+    return annot
 
 
-class FolderWithAugmentation(ImageFolder):
-    """Augment the minority class(es).
+class ImageFolderWithAugmentation(Dataset):
+    """Augments the minority class(es).
 
     Resample the minority classes to the same number as the majority class,
-    and append the (img_path, class_index) tuple to self.imgs. When the getter
-    is called, if the index is greater than the original sample size, then an
-    augmented version of the appended image is returned.
-    
-    The code as of now is trying to work with the data that ImageFolder has
-    already parsed. If this doesn't work out, then we can just write our own
-    torch.Dataset class that:
-    
+    and append the (img_path, class_index) tuple to self.imgs. The class:
+
       1. Iteratively walks the subdirectories and get paths to images.
-      2. Counts # of images in each class.
+      2. Counts number of images in each class.
       3. Augments all minority classes to the same number as the majority.
       4. When given an index, returns a (img, class) tuple that's either
          augmented or just normalized.
-    
-    Shouldn't be too difficult :)
 
     Args:
-        root (string):
-            Root directory path.
+        df (pd.DataFrame):
+            The format should match the output of `build_dataset_annotation`.
         augment_transforms (callable):
             A function/transform that takes in an PIL image and returns a
             transformed version. Used to augment the minority class(es).
-        **kwargs:
-            Other args passed to torchvision.datasets.ImageFolder.
-
+        normalizing_transforms (callable):
+            Same as augment_transforms, but applied to all other images
+            as a normalization.
 
      Attributes:
         classes (list):
@@ -221,56 +250,84 @@ class FolderWithAugmentation(ImageFolder):
         class_to_idx (dict):
             Dict with items (class_name, class_index).
         imgs (list):
-            List of (image path, class_index) tuples
+            List of (image path, class_index) tuples.
     """
 
-    def __init__(self, root, augment_transforms, **kwargs):
-        # Normalizing transforms applied to
-        self.augment_transforms = augment_transforms
-        super(ImageFolder, self).__init__(
-            root=root,
-            loader=default_loader,
-            extensions=IMG_EXTENSIONS,
-            transform=NORM_TRANSFORMS,
-            **kwargs
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        augment_transforms: Callable[[Image.Image], Any],
+        normalizing_transforms: Callable,
+    ):
+        self.aug_transforms = augment_transforms
+        self.norm_transforms = normalizing_transforms
+
+        self.classes, self.class_to_idx = self.find_classes(df)
+        self.imgs, self.aug_samples = self.extract_samples(df)
+
+    @staticmethod
+    def find_classes(df: pd.DataFrame) -> Tuple[List[str], Dict[str, int]]:
+        classes = df["cls_label"].unique()
+        classes.sort()
+        classes = classes.tolist()
+
+        class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
+        return classes, class_to_idx
+
+    def extract_samples(
+        self, df: pd.DataFrame
+    ) -> Tuple[List[Tuple[Any, int]], List[bool]]:
+        img_samples = (
+            df.assign(
+                cls_index=lambda x: [
+                    self.class_to_idx[label] for label in x["cls_label"]
+                ]
+            )
+            .filter(["filepath", "cls_index"])
+            .to_records(index=False)
         )
-        self.imgs = self.samples
-        self.majority_class = None
-        self.original_length = len(self.imgs)
 
-        self._find_majority_class()
-        self._resample_imgs()
+        aug_samples = df["aug_image"].tolist()
+        return img_samples, aug_samples
 
-    def _find_majority_class(self):
-        """Finds index of the majority class."""
-        class_counts = Counter((x[1] for x in self.imgs))
-        self.majority_class = max(class_counts, key=lambda x: class_counts[x])
+    @staticmethod
+    def read_pil_image(path: Path) -> Image.Image:
+        """
+        Same as pil_loader function in torchvision.
+        """
+        with open(path, "rb") as f:
+            img = Image.open(f)
+            return img.convert("RGB")
 
-    def _resample_imgs(self):
-        pass
+    def __getitem__(self, index: int) -> Tuple[Any, int]:
+        """
+        Returns (sample, target) tuple where target is the index of the class label.
+        """
+        path, target = self.imgs[index]
+        augment_sample = self.aug_samples[index]
 
-    def __getitem__(self, index):
-        path, target = self.samples[index]
-        sample = self.loader(path)
-        if self.transform is not None:
-            sample = self.transform(sample)
+        sample = self.read_pil_image(path)
+        if augment_sample:
+            sample = self.aug_transforms(sample)
+        else:
+            sample = self.norm_transforms(sample)
 
         return sample, target
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.imgs)
 
 
-# +
-from pathlib import Path
-
-data_dir = Path("../chest_xray").expanduser().resolve()
-aug_transforms = transforms.Compose(
-    [
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(degrees=30),
-    ]
-)
-pneumonia_train = FolderWithAugmentation(
-    data_dir / "train", augment_transforms=aug_transforms
-)
+if __name__ == "__main__":
+    # Test build_dataset_annotation
+    data_dir = Path("./chest_xray").expanduser().resolve()
+    annot = build_dataset_annotation(data_dir / "train")
+    print(
+        annot.filter(["cls_label", "aug_image"])
+        .value_counts()
+        .reset_index()
+        .pivot(index="cls_label", columns="aug_image", values=0)
+        .fillna(0)
+        .assign(Total=lambda x: x.sum(axis=1))
+        .astype(int)
+    )
