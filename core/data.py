@@ -9,6 +9,28 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
+# Default normalizing and augmenting transformations
+NORM_TRANSFORMS = transforms.Compose(
+    [
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+AUG_TRANSFORMS = transforms.Compose(
+    [
+        # transforms.RandomResizedCrop(224),
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(degrees=30),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
 
 class PneumoniaDataModule(pl.LightningDataModule):
     """Loads data for the pneumonia classifier.
@@ -35,6 +57,9 @@ class PneumoniaDataModule(pl.LightningDataModule):
         augment_minority (bool, optional):
             If true, the minority class(es) will be augmented to the same
             sample size as the majority class.
+        normalize_transforms (callable, optional):
+            A function/transform that takes in an PIL image and returns a
+            transformed version.
         augment_transforms (callable, optional):
             A function/transform that takes in an PIL image and returns a
             transformed version. Used to augment the minority class(es).
@@ -42,13 +67,14 @@ class PneumoniaDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        data_dir,
-        batch_size=32,
-        num_workers=0,
-        val_ratio=0.1,
-        sample_from_train=False,
-        augment_minority=False,
-        augment_transforms=None,
+        data_dir: Path,
+        batch_size: int = 32,
+        num_workers: int = 0,
+        val_ratio: float = 0.1,
+        sample_from_train: bool = False,
+        augment_minority: bool = False,
+        normalize_transforms: Optional[Callable] = NORM_TRANSFORMS,
+        augment_transforms: Optional[Callable] = AUG_TRANSFORMS,
     ):
         super().__init__()
 
@@ -59,18 +85,8 @@ class PneumoniaDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.val_ratio = val_ratio
 
-        # Default image transforms
-        self.norm_transforms = NORM_TRANSFORMS
-
-        if augment_transforms:
-            self.aug_transforms = augment_transforms
-        else:
-            self.aug_transforms = transforms.Compose(
-                [
-                    transforms.RandomHorizontalFlip(),
-                    transforms.RandomRotation(degrees=30),
-                ]
-            )
+        self.norm_transforms = normalize_transforms
+        self.aug_transforms = augment_transforms
 
         # Dict mapping class label -> index
         self.class_to_idx = None
@@ -89,13 +105,13 @@ class PneumoniaDataModule(pl.LightningDataModule):
         else:
             self._setup(stage)
 
-    def _setup(self, stage):
+    def _setup(self, stage: str):
         if stage == "fit":
             pneumonia_train = ImageFolder(
-                self.data_dir / "train", transform=self.norm_transforms
+                str(self.data_dir / "train"), transform=self.norm_transforms
             )
             pneumonia_val = ImageFolder(
-                self.data_dir / "val", transform=self.norm_transforms
+                str(self.data_dir / "val"), transform=self.norm_transforms
             )
             dat = ConcatDataset([pneumonia_train, pneumonia_val])
             self.class_to_idx = pneumonia_train.class_to_idx
@@ -111,16 +127,16 @@ class PneumoniaDataModule(pl.LightningDataModule):
 
         if stage == "test":
             self.pneumonia_test = ImageFolder(
-                self.data_dir / "test", transform=self.norm_transforms
+                str(self.data_dir / "test"), transform=self.norm_transforms
             )
             self.class_to_idx = self.pneumonia_test.class_to_idx
 
     def _setup_resample_train(self):
         pneumonia_train = ImageFolder(
-            self.data_dir / "train", transform=self.norm_transforms
+            str(self.data_dir / "train"), transform=self.norm_transforms
         )
         pneumonia_val = ImageFolder(
-            self.data_dir / "val", transform=self.norm_transforms
+            str(self.data_dir / "val"), transform=self.norm_transforms
         )
         dat = ConcatDataset([pneumonia_train, pneumonia_val])
         self.class_to_idx = pneumonia_train.class_to_idx
