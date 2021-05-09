@@ -32,153 +32,6 @@ AUG_TRANSFORMS = transforms.Compose(
 )
 
 
-class PneumoniaDataModule(pl.LightningDataModule):
-    """Loads data for the pneumonia classifier.
-
-    This module defines the training, validation and test splits,
-    data preparation and transforms. The given training and validation
-    sets are merged and randomly re-split because the original validation
-    set is too small.
-
-    Args:
-        data_dir (pathlib.Path):
-            The directory containing train, val and test subdirectories.
-        batch_size (int, optional):
-            The number of samples in a batch. 32 by default.
-        num_workers (int, optional):
-            Number of subprocesses to use for data loading. The default 0 means
-            that the data will be loaded in the main process.
-        val_ratio (float, optional):
-            The proportion of the validation set. Should be a float number
-            between 0 and 1, and is set to 0.1 by default.
-        sample_from_train (bool, optional):
-            If true, sample val and test sets from the training set. Otherwise
-            the given test set is used.
-        augment_minority (bool, optional):
-            If true, the minority class(es) will be augmented to the same
-            sample size as the majority class.
-        normalize_transforms (callable, optional):
-            A function/transform that takes in an PIL image and returns a
-            transformed version.
-        augment_transforms (callable, optional):
-            A function/transform that takes in an PIL image and returns a
-            transformed version. Used to augment the minority class(es).
-    """
-
-    def __init__(
-        self,
-        data_dir: Path,
-        batch_size: int = 32,
-        num_workers: int = 0,
-        val_ratio: float = 0.1,
-        sample_from_train: bool = False,
-        augment_minority: bool = False,
-        normalize_transforms: Optional[Callable] = NORM_TRANSFORMS,
-        augment_transforms: Optional[Callable] = AUG_TRANSFORMS,
-    ):
-        super().__init__()
-
-        # Input args
-        self.data_dir = data_dir
-        self.sample_from_train = sample_from_train
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.val_ratio = val_ratio
-
-        self.norm_transforms = normalize_transforms
-        self.aug_transforms = augment_transforms
-
-        # Dict mapping class label -> index
-        self.class_to_idx = None
-
-    def prepare_data(self):
-        # download, split, etc...
-        # only called on 1 GPU/TPU in distributed
-        pass
-
-    def setup(self, stage: str) -> None:
-        # make assignments here (val/train/test split)
-        # called on every process in DDP
-
-        if self.sample_from_train:
-            self._setup_resample_train()
-        else:
-            self._setup(stage)
-
-    def _setup(self, stage: str):
-        if stage == "fit":
-            pneumonia_train = ImageFolder(
-                str(self.data_dir / "train"), transform=self.norm_transforms
-            )
-            pneumonia_val = ImageFolder(
-                str(self.data_dir / "val"), transform=self.norm_transforms
-            )
-            dat = ConcatDataset([pneumonia_train, pneumonia_val])
-            self.class_to_idx = pneumonia_train.class_to_idx
-
-            # Re-split train and val sets because the original
-            # val set was too small (16 samples in total)
-            val_sample_num = int(self.val_ratio * len(dat))
-            train_sample_num = len(dat) - val_sample_num
-
-            self.pneumonia_train, self.pneumonia_val = random_split(
-                dat, [train_sample_num, val_sample_num]
-            )
-
-        if stage == "test":
-            self.pneumonia_test = ImageFolder(
-                str(self.data_dir / "test"), transform=self.norm_transforms
-            )
-            self.class_to_idx = self.pneumonia_test.class_to_idx
-
-    def _setup_resample_train(self):
-        pneumonia_train = ImageFolder(
-            str(self.data_dir / "train"), transform=self.norm_transforms
-        )
-        pneumonia_val = ImageFolder(
-            str(self.data_dir / "val"), transform=self.norm_transforms
-        )
-        dat = ConcatDataset([pneumonia_train, pneumonia_val])
-        self.class_to_idx = pneumonia_train.class_to_idx
-
-        # First split a test set
-        test_sample_num = int(0.1 * len(dat))
-        n = len(dat) - test_sample_num
-        dat_n, self.pneumonia_test = random_split(dat, [n, test_sample_num])
-
-        # Re-split train and val sets
-        val_sample_num = int(self.val_ratio * n)
-        train_sample_num = n - val_sample_num
-
-        self.pneumonia_train, self.pneumonia_val = random_split(
-            dat_n, [train_sample_num, val_sample_num]
-        )
-
-    def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.pneumonia_train,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.pneumonia_val,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-    def test_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.pneumonia_test,
-            batch_size=2 * self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-
 def build_dataset_annotation(
     root_dir: Path, seed: Optional[int] = None
 ) -> pd.DataFrame:
@@ -227,12 +80,13 @@ def build_dataset_annotation(
             continue
 
         augment_size = majority_class_size - class_counts[target_class]
-        aug_samples = (
-            annot.query("cls_label == @target_class")
-            .sample(n=augment_size, replace=True, random_state=seed)
-            .assign(aug_image=True)
-        )
-        annot = pd.concat([annot, aug_samples], axis=0, ignore_index=True)
+        if augment_size != 0:
+            aug_samples = (
+                annot.query("cls_label == @target_class")
+                .sample(n=augment_size, replace=True, random_state=seed)
+                .assign(aug_image=True)
+            )
+            annot = pd.concat([annot, aug_samples], axis=0, ignore_index=True)
 
     annot.reset_index(drop=True, inplace=True)
     return annot
@@ -272,8 +126,8 @@ class ImageFolderWithAugmentation(Dataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        augment_transforms: Callable[[Image.Image], Any],
-        normalizing_transforms: Callable,
+        augment_transforms: Callable[[Image.Image], Any] = AUG_TRANSFORMS,
+        normalizing_transforms: Callable[[Image.Image], Any] = NORM_TRANSFORMS,
     ):
         self.aug_transforms = augment_transforms
         self.norm_transforms = normalizing_transforms
@@ -332,6 +186,161 @@ class ImageFolderWithAugmentation(Dataset):
 
     def __len__(self) -> int:
         return len(self.imgs)
+
+
+class PneumoniaDataModule(pl.LightningDataModule):
+    """Loads data for the pneumonia classifier.
+
+    This module defines the training, validation and test splits,
+    data preparation and transforms. The given training and validation
+    sets are merged and randomly re-split because the original validation
+    set is too small.
+
+    Args:
+        data_dir (pathlib.Path):
+            The directory containing train, val and test subdirectories.
+        batch_size (int, optional):
+            The number of samples in a batch. 32 by default.
+        num_workers (int, optional):
+            Number of subprocesses to use for data loading. The default 0 means
+            that the data will be loaded in the main process.
+        val_ratio (float, optional):
+            The proportion of the validation set. Should be a float number
+            between 0 and 1, and is set to 0.1 by default.
+        sample_from_train (bool, optional):
+            If true, sample val and test sets from the training set. Otherwise
+            the given test set is used.
+        augment_minority (bool, optional):
+            If true, the minority class(es) will be augmented to the same
+            sample size as the majority class.
+        normalize_transforms (callable, optional):
+            A function/transform that takes in an PIL image and returns a
+            transformed version.
+        augment_transforms (callable, optional):
+            A function/transform that takes in an PIL image and returns a
+            transformed version. Used to augment the minority class(es).
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        batch_size: int = 32,
+        num_workers: int = 0,
+        val_ratio: float = 0.1,
+        sample_from_train: bool = False,
+        augment_minority: bool = False,
+        normalize_transforms: Optional[Callable] = NORM_TRANSFORMS,
+        augment_transforms: Optional[Callable] = AUG_TRANSFORMS,
+    ):
+        super().__init__()
+
+        # Input args
+        self.data_dir = data_dir
+        self.sample_from_train = sample_from_train
+        self.augment_minority = augment_minority
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.val_ratio = val_ratio
+
+        self.norm_transforms = normalize_transforms
+        self.aug_transforms = augment_transforms
+
+        # Dict mapping class label -> index
+        self.class_to_idx = None
+
+    def prepare_data(self):
+        # download, split, etc...
+        # only called on 1 GPU/TPU in distributed
+        pass
+
+    def setup(self, stage: str) -> None:
+        # make assignments here (val/train/test split)
+        # called on every process in DDP
+        if self.sample_from_train:
+            self._setup_resample_train()
+        else:
+            self._setup(stage)
+
+    def _setup(self, stage: str):
+        if stage == "fit":
+            if self.augment_minority:
+                dat = self._read_data_with_resampling()
+            else:
+                dat = self._read_train_val()
+            # Re-split train and val sets because the original
+            # val set was too small (16 samples in total)
+            val_sample_num = int(self.val_ratio * len(dat))
+            train_sample_num = len(dat) - val_sample_num
+
+            self.pneumonia_train, self.pneumonia_val = random_split(
+                dat, [train_sample_num, val_sample_num]
+            )
+
+        if stage == "test":
+            self.pneumonia_test = ImageFolder(
+                str(self.data_dir / "test"), transform=self.norm_transforms
+            )
+            self.class_to_idx = self.pneumonia_test.class_to_idx
+
+    def _setup_resample_train(self):
+        if self.augment_minority:
+            dat = self._read_data_with_resampling()
+        else:
+            dat = self._read_train_val()
+
+        # First split a test set
+        test_sample_num = int(0.1 * len(dat))
+        n = len(dat) - test_sample_num
+        dat_n, self.pneumonia_test = random_split(dat, [n, test_sample_num])
+
+        # Re-split train and val sets
+        val_sample_num = int(self.val_ratio * n)
+        train_sample_num = n - val_sample_num
+
+        self.pneumonia_train, self.pneumonia_val = random_split(
+            dat_n, [train_sample_num, val_sample_num]
+        )
+
+    def _read_train_val(self) -> ConcatDataset:
+        pneumonia_train = ImageFolder(
+            str(self.data_dir / "train"), transform=self.norm_transforms
+        )
+        pneumonia_val = ImageFolder(
+            str(self.data_dir / "val"), transform=self.norm_transforms
+        )
+        self.class_to_idx = pneumonia_train.class_to_idx
+        return ConcatDataset([pneumonia_train, pneumonia_val])
+
+    def _read_data_with_resampling(self) -> ImageFolderWithAugmentation:
+        train_annot = build_dataset_annotation(self.data_dir / "train", 42)
+        val_annot = build_dataset_annotation(self.data_dir / "val", 42)
+        annot = pd.concat([train_annot, val_annot], ignore_index=True, axis=0)
+
+        return ImageFolderWithAugmentation(annot)
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.pneumonia_train,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.pneumonia_val,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.pneumonia_test,
+            batch_size=2 * self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
 
 
 if __name__ == "__main__":

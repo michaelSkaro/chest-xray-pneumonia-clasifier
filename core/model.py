@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models
 
+
 class PneumoniaDetector(pl.LightningModule):
     def __init__(self, lr, **kwargs):
         super().__init__()
