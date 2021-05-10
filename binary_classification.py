@@ -220,6 +220,7 @@ def show_confusion_mat(model, datamod):
     y_pred = torch.cat(y_pred).cpu()
     y_true = torch.cat(y_true).cpu()
 
+    labels = sorted(datamod.class_to_idx.keys())
     mat = confusion_matrix(y_true, y_pred, labels=sorted(datamod.class_to_idx.values()))
     res = pd.DataFrame(mat, columns=labels, index=labels)
     res.index = [f"True {x}" for x in res.index]
