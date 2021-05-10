@@ -5,8 +5,9 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models
 
+
 class PneumoniaDetector(pl.LightningModule):
-    def __init__(self, lr, **kwargs):
+    def __init__(self, lr, class_num=2, **kwargs):
         super().__init__()
 
         # Hyperparameters (all kwargs) are saved in self.hparams
@@ -28,15 +29,16 @@ class PneumoniaDetector(pl.LightningModule):
         self.classifier = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),  # 2nd to last layer of ResNet
             nn.Flatten(),
-            nn.Linear(num_feat_last_layer, 2),
+            nn.Linear(num_feat_last_layer, class_num),
         )
 
         # Metrics
+
         metrics = {
             "accuracy": Accuracy(),
-            "precision": Precision(is_multiclass=False),
-            "recall": Recall(is_multiclass=False),
-            "f1": F1(num_classes=2),
+            "precision": Precision(is_multiclass=(class_num > 2)),
+            "recall": Recall(is_multiclass=(class_num > 2)),
+            "f1": F1(num_classes=class_num),
         }
         self.train_metrics = self._gen_metric_collection(metrics, "train")
         self.val_metrics = self._gen_metric_collection(metrics, "val")
