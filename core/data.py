@@ -32,19 +32,15 @@ AUG_TRANSFORMS = transforms.Compose(
 )
 
 
-def build_dataset_annotation(
-    root_dir: Path, seed: Optional[int] = None
-) -> pd.DataFrame:
+def build_dataset_annotation(root_dir: Path) -> pd.DataFrame:
     """Generates annotation table of samples.
 
     Given a folder, all subdirectories are considered as class labels. Images
-    in each subdirectory are counted, and all classes with smaller sample sizes
-    are resampled. The returned DataFrame can be used as the input for our torch
-    dataset class ImageFolderWithAugmentation.
+    in each subdirectory are counted. The returned DataFrame can be used as the
+    input for our torch dataset class ImageFolderWithAugmentation.
 
     Arguments:
         root_dir (Path): directory containing subdirectories with images.
-        seed (int): seed number for sampling.
 
     Returns:
         A pandas DataFrame with columns:
@@ -69,13 +65,72 @@ def build_dataset_annotation(
         {"filepath": img_paths, "cls_label": cls_labels, "aug_image": False}
     )
 
+    return annot
+
+
+def build_subclass_dataset_annotation(root_dir: Path) -> pd.DataFrame:
+    """Generates annotation table of samples for three classes.
+
+    Apart from pneumonia vs. normal, the pneumonia images can be further
+    categorized into bacterial and viral subgroups. Everything else is similar
+    to the `build_dataset_annotation` function.
+
+    Arguments:
+        root_dir (Path): directory containing subdirectories with images.
+
+    Returns:
+        A pandas DataFrame with columns:
+        - filepath (Path): filepath to the image.
+        - cls_label (str): class label of the image.
+        - aug_image (bool): whether or not the image is resampled.
+    """
+    dir = root_dir.expanduser().resolve()
+
+    # Get file paths for each class label
+    img_paths, cls_labels = [], []
+
+    # normals
+    normal_dir = dir / "NORMAL"
+    normal_imgs = [f for f in normal_dir.glob("*.jpeg")]
+    normal_labels = ["NORMAL"] * len(normal_imgs)
+    img_paths.extend(normal_imgs)
+    cls_labels.extend(normal_labels)
+
+    # pneumonia subclasses
+    pneumonia_classes = ["bacteria", "virus"]
+    pneumonia_dir = dir / "PNEUMONIA"
+    for target_class in pneumonia_classes:
+        target_imgs = [f for f in pneumonia_dir.glob(f"*_{target_class}_*.jpeg")]
+        target_labels = [target_class] * len(target_imgs)
+
+        img_paths.extend(target_imgs)
+        cls_labels.extend(target_labels)
+
+    # Arrange results into a DataFrame
+    annot = pd.DataFrame(
+        {"filepath": img_paths, "cls_label": cls_labels, "aug_image": False}
+    )
+    return annot
+
+
+def augment_minority_in_annot(
+    annot: pd.DataFrame, seed: Optional[int] = None
+) -> pd.DataFrame:
+    """Resamples all classes with smaller sample sizes.
+
+    Arguments:
+        annot (pd.DataFrame):
+            The format should match the output of `build_dataset_annotation`.
+        seed (int, optional):
+            Seed number for sampling.
+    """
     # Count number of samples in each class
-    class_counts = Counter(cls_labels)
+    class_counts = Counter(annot["cls_label"])
     majority_class = max(class_counts, key=lambda x: class_counts[x])
     majority_class_size = class_counts[majority_class]
 
     # Mark samples in the minority class(es) that need to be augmented
-    for target_class in classes:
+    for target_class in class_counts.keys():
         if target_class == majority_class:
             continue
 
@@ -213,6 +268,8 @@ class PneumoniaDataModule(pl.LightningDataModule):
         augment_minority (bool, optional):
             If true, the minority class(es) will be augmented to the same
             sample size as the majority class.
+        pneumonia_subclass (bool, optional):
+            Treat bacterial and viral pneumonia as separate classes.
         normalize_transforms (callable, optional):
             A function/transform that takes in an PIL image and returns a
             transformed version.
@@ -229,6 +286,7 @@ class PneumoniaDataModule(pl.LightningDataModule):
         val_ratio: float = 0.1,
         sample_from_train: bool = False,
         augment_minority: bool = False,
+        pneumonia_subclass: bool = False,
         normalize_transforms: Optional[Callable] = NORM_TRANSFORMS,
         augment_transforms: Optional[Callable] = AUG_TRANSFORMS,
     ):
@@ -242,16 +300,18 @@ class PneumoniaDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.val_ratio = val_ratio
 
+        # If we want three classes instead of two
+        self.test_subclasses = pneumonia_subclass
+        if pneumonia_subclass:
+            self.annot_builder = build_subclass_dataset_annotation
+        else:
+            self.annot_builder = build_dataset_annotation
+
         self.norm_transforms = normalize_transforms
         self.aug_transforms = augment_transforms
 
         # Dict mapping class label -> index
         self.class_to_idx = None
-
-    def prepare_data(self):
-        # download, split, etc...
-        # only called on 1 GPU/TPU in distributed
-        pass
 
     def setup(self, stage: str) -> None:
         # make assignments here (val/train/test split)
@@ -277,9 +337,13 @@ class PneumoniaDataModule(pl.LightningDataModule):
             )
 
         if stage == "test":
-            self.pneumonia_test = ImageFolder(
-                str(self.data_dir / "test"), transform=self.norm_transforms
-            )
+            if self.test_subclasses:
+                test_annot = self.annot_builder(self.data_dir / "test")
+                self.pneumonia_test = ImageFolderWithAugmentation(test_annot)
+            else:
+                self.pneumonia_test = ImageFolder(
+                    str(self.data_dir / "test"), transform=self.norm_transforms
+                )
             self.class_to_idx = self.pneumonia_test.class_to_idx
 
     def _setup_resample_train(self):
@@ -312,9 +376,10 @@ class PneumoniaDataModule(pl.LightningDataModule):
         return ConcatDataset([pneumonia_train, pneumonia_val])
 
     def _read_data_with_resampling(self) -> ImageFolderWithAugmentation:
-        train_annot = build_dataset_annotation(self.data_dir / "train", 42)
-        val_annot = build_dataset_annotation(self.data_dir / "val", 42)
+        train_annot = self.annot_builder(self.data_dir / "train")
+        val_annot = self.annot_builder(self.data_dir / "val")
         annot = pd.concat([train_annot, val_annot], ignore_index=True, axis=0)
+        annot = augment_minority_in_annot(annot, seed=42)
 
         return ImageFolderWithAugmentation(annot)
 
